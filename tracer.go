@@ -1,12 +1,14 @@
-package main
+package tracer
 
 import (
+        "context"
         "crypto/rand"
         "encoding/hex"
-        "encoding/json"
         "fmt"
         "log"
         "time"
+
+        "github.com/dash-xd/gospace/internal/axiomlogger"
 )
 
 type Span struct {
@@ -22,13 +24,13 @@ type Span struct {
 
 type Tracer struct {
         ServiceName string
-        Traces      map[string][]*Span
+        Logger      *axiomlogger.Logger
 }
 
-func NewTracer(serviceName string) *Tracer {
+func NewTracer(serviceName string, logger *axiomlogger.Logger) *Tracer {
         return &Tracer{
                 ServiceName: serviceName,
-                Traces:      make(map[string][]*Span),
+                Logger:      logger,
         }
 }
 
@@ -41,10 +43,16 @@ func (t *Tracer) generateSecureID() string {
         return hex.EncodeToString(b)
 }
 
-func (t *Tracer) StartSpan(name string, parentSpanID *string) *Span {
-        var traceID string
+func (t *Tracer) StartSpan(ctx context.Context, name string) (context.Context, *Span) {
+        var parentSpanID *string
+        if parentSpan, ok := ctx.Value("span").(*Span); ok {
+                parentSpanIDPtr := parentSpan.SpanID
+                parentSpanID = &parentSpanIDPtr
+        }
+
+        traceID := ""
         if parentSpanID != nil {
-                traceID = t.Traces[*parentSpanID][0].TraceID
+                traceID = ctx.Value("traceID").(string)
         } else {
                 traceID = t.generateSecureID()
         }
@@ -66,32 +74,31 @@ func (t *Tracer) StartSpan(name string, parentSpanID *string) *Span {
                 span.ParentSpanID = *parentSpanID
         }
 
-        if _, ok := t.Traces[traceID]; !ok {
-                t.Traces[traceID] = []*Span{}
-        }
+        newCtx := context.WithValue(ctx, "span", span)
+        newCtx = context.WithValue(newCtx, "traceID", traceID)
 
-        t.Traces[traceID] = append(t.Traces[traceID], span)
-        return span
+        return newCtx, span
 }
 
-func (t *Tracer) EndSpan(span *Span, status string, attributes map[string]string) {
+func (t *Tracer) EndSpan(ctx context.Context, span *Span, status string, attributes map[string]string) {
         endTime := time.Now()
         span.EndTime = &endTime
         span.Status = status
         for k, v := range attributes {
                 span.Attributes[k] = v
         }
-}
 
-func (t *Tracer) GetTrace(traceID string) []*Span {
-        return t.Traces[traceID]
-}
-
-func (t *Tracer) ExportTraces() {
-        fmt.Println("Exporting traces...")
-        jsonData, err := json.MarshalIndent(t.Traces, "", "  ")
-        if err != nil {
-                log.Fatalf("Error marshaling traces: %v", err)
+        data := map[string]interface{}{
+                "traceId":      span.TraceID,
+                "spanId":       span.SpanID,
+                "parentSpanId": span.ParentSpanID,
+                "name":         span.Name,
+                "startTime":    span.StartTime,
+                "endTime":      span.EndTime,
+                "attributes":   span.Attributes,
+                "status":       span.Status,
         }
-        fmt.Println(string(jsonData))
+        if err := t.Logger.LogData(data); err != nil {
+                log.Printf("Error logging to Axiom: %v", err)
+        }
 }
